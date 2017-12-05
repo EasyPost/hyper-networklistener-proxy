@@ -39,7 +39,7 @@ impl<T: NetworkStream> ProxyStream<T> {
 impl<T: NetworkStream> NetworkStream for ProxyStream<T> {
     fn peer_addr(&mut self) -> io::Result<SocketAddr> {
         if let Some(a) = self.peer_addr {
-            Ok(a.clone())
+            Ok(a)
         } else {
             self.inner.peer_addr()
         }

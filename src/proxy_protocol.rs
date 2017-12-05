@@ -83,7 +83,7 @@ impl Into<hyper::Error> for ProxyReadError {
             ProxyReadError::Io(e) => hyper::Error::Io(e),
             ProxyReadError::Utf8(e) => hyper::Error::Utf8(e),
             ProxyReadError::BadVersion => hyper::Error::Version,
-            _ => hyper::Error::Version,
+            _ => hyper::Error::Header,
         }
     }
 }
@@ -143,7 +143,7 @@ impl ProxyProtocolHeader {
 
 impl ProxyProtocolHeader {
     pub(crate) fn source_addr(&self) -> Option<SocketAddr> {
-        self.source_addr.clone()
+        self.source_addr
     }
 }
 
@@ -154,11 +154,9 @@ fn read_to_crlf<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<usize> {
     // read until we either exceed the buf or find a CRLF. SO INEFFICIENT
     for i in 0..107 {
         r.read_exact(&mut buf[i..i+1])?;
-        if i > 1 {
-            if buf[i-1] == 13u8 && buf[i] == 10u8 {
-                found_crlf_at = Some(i-1);
-                break;
-            }
+        if i > 1  && buf[i-1] == 13u8 && buf[i] == 10u8 {
+            found_crlf_at = Some(i-1);
+            break;
         }
     }
     if let Some(end_idx) = found_crlf_at {
@@ -291,10 +289,7 @@ fn read_proxy_protocol_v2_after_first_byte<R: Read>(r: &mut R, header_buf_alread
             let dest_port = NetworkEndian::read_u16(&addr_buf[34..36]);
             (SocketAddr::new(source_addr, source_port), SocketAddr::new(dest_addr, dest_port))
         },
-        AddressFamily::Unix => {
-            return Ok(ProxyProtocolHeader::new_unknown(protocol_version))
-        },
-        AddressFamily::Unspec => {
+        AddressFamily::Unix | AddressFamily::Unspec => {
             return Ok(ProxyProtocolHeader::new_unknown(protocol_version))
         }
     };
