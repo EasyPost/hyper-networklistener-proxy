@@ -9,3 +9,10 @@ description = "Hyper NetworkListener implementing the PROXY protocol"
 [dependencies]
 hyper = "0.10"
 byteorder = "*"
+
+[dev_dependencies]
+iron = "0.6"
+clap = "2"
+router = "0.6"
+env_logger = "0.4"
+log = "0.3"
