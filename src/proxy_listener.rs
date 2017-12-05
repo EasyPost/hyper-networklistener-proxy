@@ -5,7 +5,7 @@ use hyper;
 use hyper::net::NetworkListener;
 
 use proxy_protocol::ProxyProtocolVersion;
-use proxy_stream::ProxyStream;
+pub use proxy_stream::ProxyStream;
 
 
 #[derive(Clone)]

@@ -11,14 +11,15 @@ use proxy_protocol::read_proxy_protocol_v2;
 use proxy_protocol::read_proxy_protocol_any;
 
 
+/// Wrapper class for holding a `NetworkStream` off of which we have already
+/// read a PROXY protocol header
 #[derive(Clone, Debug)]
-/// Wrapper class for holding a Stream which we may have already read the PROXY protocol off of
-pub struct ProxyStream<T: NetworkStream+Clone> {
+pub struct ProxyStream<T: NetworkStream> {
     inner: T,
     peer_addr: Option<SocketAddr>
 }
 
-impl<T: NetworkStream+Read+Write+Clone> ProxyStream<T> {
+impl<T: NetworkStream> ProxyStream<T> {
     pub(crate) fn from_stream(mut stream: T, v: ProxyProtocolVersion) -> hyper::Result<Self> {
         // XXX: should we be setting a read timeout here?
         // HttpListener sets the timeout in its `accept`, so it should be fine,
@@ -35,7 +36,7 @@ impl<T: NetworkStream+Read+Write+Clone> ProxyStream<T> {
     }
 }
 
-impl<T: NetworkStream+Read+Write+Clone> NetworkStream for ProxyStream<T> {
+impl<T: NetworkStream> NetworkStream for ProxyStream<T> {
     fn peer_addr(&mut self) -> io::Result<SocketAddr> {
         if let Some(a) = self.peer_addr {
             Ok(a.clone())
@@ -44,31 +45,45 @@ impl<T: NetworkStream+Read+Write+Clone> NetworkStream for ProxyStream<T> {
         }
     }
 
+    #[inline]
     fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         self.inner.set_read_timeout(dur)
     }
 
+    #[inline]
     fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         self.inner.set_write_timeout(dur)
     }
 
+    #[inline]
     fn close(&mut self, how: Shutdown) -> io::Result<()> {
         self.inner.close(how)
     }
 }
 
-impl<T: NetworkStream+Read+Write+Clone> Read for ProxyStream<T> {
+impl<T: NetworkStream> Read for ProxyStream<T> {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf)
     }
 }
 
-impl<T: NetworkStream+Write+Clone> Write for ProxyStream<T> {
+impl<T: NetworkStream> Write for ProxyStream<T> {
+    #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.inner.write(buf)
     }
 
+    #[inline]
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+#[cfg(unix)]
+impl<T: NetworkStream+::std::os::unix::io::AsRawFd> ::std::os::unix::io::AsRawFd for ProxyStream<T> {
+    #[inline]
+    fn as_raw_fd(&self) -> ::std::os::unix::io::RawFd {
+        self.inner.as_raw_fd()
     }
 }

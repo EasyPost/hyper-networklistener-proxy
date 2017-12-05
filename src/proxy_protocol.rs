@@ -9,6 +9,9 @@ use hyper;
 use byteorder::{NetworkEndian,ByteOrder};
 
 
+/// Version of the PROXY protocol to look for. The `Any` option will attempt to guess between
+/// V1 and V2, but does more I/O in order to do so. `V2` is significantly faster than `V1` or `Any`
+/// and should be preferred whenever possible.
 #[derive(Debug,Clone,PartialEq,Eq,Copy)]
 pub enum ProxyProtocolVersion {
     V1,
@@ -99,6 +102,7 @@ pub(crate) enum Proto {
 pub(crate) struct ProxyProtocolHeader {
     version: u8,
     proto: Proto,
+    command: Command,
     source_addr: Option<SocketAddr>,
     dest_addr: Option<SocketAddr>,
 }
@@ -110,7 +114,18 @@ impl ProxyProtocolHeader {
             version: version,
             proto: proto,
             source_addr: Some(source_addr),
-            dest_addr: Some(dest_addr)
+            dest_addr: Some(dest_addr),
+            command: Command::Proxy
+        }
+    }
+
+    fn new_with_command(version: u8, proto: Proto, command: Command, source_addr: SocketAddr, dest_addr: SocketAddr) -> Self {
+        ProxyProtocolHeader {
+            version: version,
+            proto: proto,
+            source_addr: Some(source_addr),
+            dest_addr: Some(dest_addr),
+            command: command
         }
     }
 
@@ -120,6 +135,7 @@ impl ProxyProtocolHeader {
             proto: Proto::Unknown,
             source_addr: None,
             dest_addr: None,
+            command: Command::Unspec,
         }
     }
 }
@@ -185,9 +201,10 @@ pub(crate) fn read_proxy_protocol_v1<R: Read>(r: &mut R) -> Result<ProxyProtocol
 
 
 #[derive(Debug,PartialEq,Eq)]
-enum Command {
+pub(crate) enum Command {
     Local,
     Proxy,
+    Unspec,
 }
 
 #[derive(Debug,PartialEq,Eq)]
@@ -284,7 +301,7 @@ fn read_proxy_protocol_v2_after_first_byte<R: Read>(r: &mut R, header_buf_alread
     if transport != TransportFamily::Stream {
         return Err(ProxyReadError::InvalidProtocol);
     }
-    Ok(ProxyProtocolHeader::new(
+    Ok(ProxyProtocolHeader::new_with_command(
         protocol_version,
         match af {
             AddressFamily::Inet => Proto::Tcp4,
@@ -292,6 +309,7 @@ fn read_proxy_protocol_v2_after_first_byte<R: Read>(r: &mut R, header_buf_alread
             AddressFamily::Unix => Proto::Unix,
             AddressFamily::Unspec => unreachable!()
         },
+        command,
         source,
         dest
     ))
