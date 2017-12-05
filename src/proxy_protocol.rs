@@ -23,6 +23,7 @@ pub(crate) enum ProxyReadError {
     MissingLiteral,
     InvalidProtocol,
     MissingCrlf,
+    MissingFirstByte,
     BadVersion,
     BadSourceAddress(AddrParseError),
     BadSourcePort(ParseIntError),
@@ -124,6 +125,13 @@ impl ProxyProtocolHeader {
 }
 
 
+impl ProxyProtocolHeader {
+    pub(crate) fn source_addr(&self) -> Option<SocketAddr> {
+        self.source_addr.clone()
+    }
+}
+
+
 /// Read from a Reader into the given buffer.
 fn read_to_crlf<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<usize> {
     let mut found_crlf_at = None;
@@ -144,12 +152,9 @@ fn read_to_crlf<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<usize> {
     }
 }
 
-pub(crate) fn read_proxy_protocol_v1<R: Read>(r: &mut R) -> Result<ProxyProtocolHeader> {
-    // this is the longest that the PROXY header can be
-    let mut buf = [0u8; 107];
-    let buf_len = read_to_crlf(r, &mut buf)?;
-    let mut fields = (&buf[0..buf_len]).split(|&f| f == 32u8).map(|f| ::std::str::from_utf8(f));
-    if fields.next() != Some(Ok("PROXY")) {
+fn parse_proxy_protocol_v1_after_first_byte(buf: &[u8]) -> Result<ProxyProtocolHeader> {
+    let mut fields = buf.split(|&f| f == 32u8).map(|f| ::std::str::from_utf8(f));
+    if fields.next() != Some(Ok("ROXY")) {
         return Err(ProxyReadError::MissingLiteral);
     }
     let proto = match fields.next().ok_or(ProxyReadError::MissingField)?? {
@@ -166,6 +171,16 @@ pub(crate) fn read_proxy_protocol_v1<R: Read>(r: &mut R) -> Result<ProxyProtocol
     let source_port: u16 = fields.next().ok_or(ProxyReadError::MissingField)??.parse().map_err(ProxyReadError::BadSourcePort)?;
     let dest_port: u16 = fields.next().ok_or(ProxyReadError::MissingField)??.parse().map_err(ProxyReadError::BadDestPort)?;
     Ok(ProxyProtocolHeader::new(1, proto, SocketAddr::new(source_address, source_port), SocketAddr::new(dest_address, dest_port)))
+}
+
+pub(crate) fn read_proxy_protocol_v1<R: Read>(r: &mut R) -> Result<ProxyProtocolHeader> {
+    // this is the longest that the PROXY header can be
+    let mut buf = [0u8; 107];
+    let buf_len = read_to_crlf(r, &mut buf)?;
+    if buf[0] != 0x50 { // P as in P-ROXY
+        return Err(ProxyReadError::MissingLiteral);
+    }
+    parse_proxy_protocol_v1_after_first_byte(&buf[1..buf_len])
 }
 
 
@@ -205,9 +220,13 @@ fn slice_to_ipv6addr(slice: &[u8]) -> Ipv6Addr {
 }
 
 
-pub(crate) fn read_proxy_protocol_v2<R: Read>(r: &mut R) -> Result<ProxyProtocolHeader> {
-    let mut header_buf = [0u8; 16];
-    r.read_exact(&mut header_buf)?;
+fn read_proxy_protocol_v2_after_first_byte<R: Read>(r: &mut R, header_buf_already_read: &[u8]) -> Result<ProxyProtocolHeader> {
+    let mut header_buf = [0u8;16];
+    let bytes_read = header_buf_already_read.len();
+    if bytes_read < 16 {
+        r.read_exact(&mut header_buf[bytes_read..])?;
+    }
+    header_buf[0..bytes_read].copy_from_slice(header_buf_already_read);
     if &header_buf[0..12] != b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A" {
         return Err(ProxyReadError::MissingLiteral);
     }
@@ -262,7 +281,6 @@ pub(crate) fn read_proxy_protocol_v2<R: Read>(r: &mut R) -> Result<ProxyProtocol
             return Ok(ProxyProtocolHeader::new_unknown(protocol_version))
         }
     };
-    println!("got {:?} {:?} {:?} {:?} {:?} {:?}", protocol_version, command, af, transport, addrlen, addr_buf);
     if transport != TransportFamily::Stream {
         return Err(ProxyReadError::InvalidProtocol);
     }
@@ -279,10 +297,35 @@ pub(crate) fn read_proxy_protocol_v2<R: Read>(r: &mut R) -> Result<ProxyProtocol
     ))
 }
 
+pub(crate) fn read_proxy_protocol_v2<R: Read>(r: &mut R) -> Result<ProxyProtocolHeader> {
+    let mut header_buf = [0u8; 16];
+    r.read_exact(&mut header_buf)?;
+    if header_buf[0] != 0x0d {
+        return Err(ProxyReadError::MissingLiteral);
+    }
+    read_proxy_protocol_v2_after_first_byte(r, &header_buf)
+}
+
+
+pub(crate) fn read_proxy_protocol_any<R: Read>(r: &mut R) -> Result<ProxyProtocolHeader> {
+    let mut first_byte = [0u8; 1];
+    r.read_exact(&mut first_byte)?;
+    if first_byte[0] == 0x0d {
+        read_proxy_protocol_v2_after_first_byte(r, &first_byte)
+    } else if first_byte[0] == 0x50 {
+        let mut buf = [0u8; 107];
+        let buf_len = read_to_crlf(r, &mut buf)?;
+        parse_proxy_protocol_v1_after_first_byte(&buf[..buf_len])
+    } else {
+        Err(ProxyReadError::MissingFirstByte)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::read_proxy_protocol_v1;
     use super::read_proxy_protocol_v2;
+    use super::read_proxy_protocol_any;
     use super::Proto;
     use super::ProxyProtocolHeader;
 
@@ -302,9 +345,9 @@ mod tests {
 
     #[test]
     fn test_proxy_protocol_v1_failure_cases() {
-        let r = read_proxy_protocol_v1(&mut (b"" as &[u8])).expect_err("should not parse");
-        let r = read_proxy_protocol_v1(&mut (b"\r\n" as &[u8])).expect_err("should not parse");
-        let r = read_proxy_protocol_v1(&mut (b"proxy tcp4 255.255.255.255 255.255.255.255 0 0\r\n" as &[u8])).expect_err("should not parse");
+        read_proxy_protocol_v1(&mut (b"" as &[u8])).expect_err("should not parse");
+        read_proxy_protocol_v1(&mut (b"\r\n" as &[u8])).expect_err("should not parse");
+        read_proxy_protocol_v1(&mut (b"proxy tcp4 255.255.255.255 255.255.255.255 0 0\r\n" as &[u8])).expect_err("should not parse");
     }
 
     #[test]
@@ -315,6 +358,24 @@ mod tests {
         ];
         for (bytestr, expected) in vectors {
             let r = read_proxy_protocol_v2(&mut bytestr.as_slice()).expect("Should parse");
+            assert_eq!(r, expected);
+        }
+    }
+
+    #[test]
+    fn test_proxy_protocol_v2_failure_cases() {
+        read_proxy_protocol_v2(&mut (b"" as &[u8])).expect_err("should not parse");
+        read_proxy_protocol_v2(&mut (b"\x0d\x0a\x0d\x0a\x00\x0d\x0a\x51\x55\x49\x54\x0a" as &[u8])).expect_err("should not parse");
+    }
+
+    #[test]
+    fn test_proxy_protocol_any() {
+        let vectors = vec![
+            (b"PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\n".to_vec(), ProxyProtocolHeader::new(1, Proto::Tcp4, "192.168.0.1:56324".parse().unwrap(), "192.168.0.11:443".parse().unwrap())),
+            (b"\x0d\x0a\x0d\x0a\x00\x0d\x0a\x51\x55\x49\x54\x0a\x21\x11\x00\x0c\x0a\x0b\x0c\x0d\x7f\x00\x00\x01\x22\xb8\x27\x0f".to_vec(), ProxyProtocolHeader::new(2, Proto::Tcp4, "10.11.12.13:8888".parse().unwrap(), "127.0.0.1:9999".parse().unwrap())),
+        ];
+        for (bytestr, expected) in vectors {
+            let r = read_proxy_protocol_any(&mut bytestr.as_slice()).expect("should parse");
             assert_eq!(r, expected);
         }
     }
